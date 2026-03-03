@@ -36,6 +36,8 @@ export async function initDvrPage() {
 
     if (hasDvrPermission) {
         promises.push(loadScheduledJobs());
+        promises.push(loadRecurringSchedules());
+        setupRecurringUi();
     } else {
         // Explicitly hide these elements if user has no DVR permission
         UIElements.noDvrJobsMessage.classList.add('hidden');
@@ -59,6 +61,103 @@ async function loadScheduledJobs() {
         showNotification('Could not load scheduled recordings.', true);
     }
 }
+
+// --- NEW: Recurring DVR (Daily Schedule) ---
+async function loadRecurringSchedules() {
+    const res = await apiFetch('/api/dvr/recurring');
+    if (res && res.ok) {
+        dvrState.recurring = await res.json();
+        renderRecurringSchedules();
+    }
+}
+
+function setupRecurringUi() {
+    // Populate channel dropdown from current guide state (channels)
+    if (UIElements.dvrRecurringChannel && guideState.channels?.length) {
+        populateChannelSelector(UIElements.dvrRecurringChannel, guideState.channels, true);
+    }
+
+    UIElements.dvrRecurringRefreshBtn?.addEventListener('click', async () => {
+        await loadRecurringSchedules();
+    });
+
+    UIElements.dvrRecurringCreateBtn?.addEventListener('click', async () => {
+        const select = UIElements.dvrRecurringChannel;
+        const start = UIElements.dvrRecurringStart?.value;
+        const end = UIElements.dvrRecurringEnd?.value;
+        if (!select?.value || !start || !end) {
+            return showNotification('Select a channel and start/end time.', true);
+        }
+        const channelId = select.value;
+        const channelName = select.options[select.selectedIndex]?.textContent || 'Channel';
+
+        const res = await apiFetch('/api/dvr/recurring', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ channelId, channelName, startHHMM: start, endHHMM: end })
+        });
+        if (res && res.ok) {
+            showNotification('Daily schedule added.');
+            await loadRecurringSchedules();
+            await loadScheduledJobs();
+        } else {
+            const err = res ? await res.json().catch(() => ({})) : {};
+            showNotification(err.error || 'Could not create daily schedule.', true);
+        }
+    });
+}
+
+function renderRecurringSchedules() {
+    const tbody = UIElements.dvrRecurringTbody;
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    const rows = dvrState.recurring || [];
+    rows.forEach((r) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td>${r.channelName}</td>
+            <td>${r.startHHMM}</td>
+            <td>${r.endHHMM}</td>
+            <td>${r.enabled ? 'Enabled' : 'Disabled'}</td>
+            <td class="text-right">
+                <button data-action="toggle" data-id="${r.id}" class="bg-gray-600 hover:bg-gray-500 text-white text-xs font-bold py-1 px-2 rounded-md">${r.enabled ? 'Disable' : 'Enable'}</button>
+                <button data-action="delete" data-id="${r.id}" class="bg-red-600 hover:bg-red-500 text-white text-xs font-bold py-1 px-2 rounded-md ml-1">Delete</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    tbody.onclick = async (e) => {
+        const btn = e.target.closest('button');
+        if (!btn) return;
+        const id = btn.getAttribute('data-id');
+        const action = btn.getAttribute('data-action');
+        if (!id || !action) return;
+
+        if (action === 'delete') {
+            const ok = await showConfirm('Delete this daily schedule?');
+            if (!ok) return;
+            const res = await apiFetch(`/api/dvr/recurring/${id}`, { method: 'DELETE' });
+            if (res && res.ok) {
+                await loadRecurringSchedules();
+            }
+        }
+
+        if (action === 'toggle') {
+            const rec = rows.find(x => String(x.id) === String(id));
+            const nextEnabled = rec ? !rec.enabled : true;
+            const res = await apiFetch(`/api/dvr/recurring/${id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: nextEnabled })
+            });
+            if (res && res.ok) {
+                await loadRecurringSchedules();
+            }
+        }
+    };
+}
+// --- END Recurring DVR ---
 
 /**
  * Fetches completed recordings from the server and updates the state.

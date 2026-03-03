@@ -1538,6 +1538,37 @@
                                 class="hidden bg-gray-600 hover:bg-gray-500 text-white text-sm font-bold py-1 px-3 rounded-md">Clear
                                 All</button>
                         </div>
+
+                        <!-- NEW: Daily Schedule (Recurring DVR) -->
+                        <div class="mb-4 p-3 rounded-lg bg-gray-900/50 border border-gray-700">
+                            <div class="flex items-center justify-between gap-3 mb-2">
+                                <h3 class="text-sm font-semibold text-white">Daily Schedule</h3>
+                                <button id="dvr-recurring-refresh-btn" class="bg-gray-600 hover:bg-gray-500 text-white text-xs font-bold py-1 px-3 rounded-md">Refresh</button>
+                            </div>
+                            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                <select id="dvr-recurring-channel" class="w-full bg-gray-800 text-white text-sm p-2 rounded-md border border-gray-700"></select>
+                                <input id="dvr-recurring-start" type="time" class="w-full bg-gray-800 text-white text-sm p-2 rounded-md border border-gray-700" value="08:00" />
+                                <input id="dvr-recurring-end" type="time" class="w-full bg-gray-800 text-white text-sm p-2 rounded-md border border-gray-700" value="09:00" />
+                            </div>
+                            <div class="flex items-center justify-end mt-2">
+                                <button id="dvr-recurring-create-btn" class="bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold py-2 px-4 rounded-md">Add daily recording</button>
+                            </div>
+                            <div class="mt-3 overflow-x-auto">
+                                <table class="min-w-full dvr-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Channel</th>
+                                            <th>Start</th>
+                                            <th>End</th>
+                                            <th>Status</th>
+                                            <th class="text-right">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="dvr-recurring-tbody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <!-- END Daily Schedule -->
                         <div id="no-dvr-jobs-message" class="hidden text-center text-gray-500 p-4">
                             <p class="mt-1 text-sm">No upcoming recordings scheduled. Find a program in the TV Guide to
                                 record it.</p>

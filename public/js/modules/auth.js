@@ -111,6 +111,14 @@ const initializeUIElements = () => {
     UIElements.tabDvr = document.getElementById('tab-dvr');
     UIElements.mobileNavDvr = document.getElementById('mobile-nav-dvr');
     UIElements.dvrJobsTbody = document.getElementById('dvr-jobs-tbody');
+
+    // NEW: Recurring DVR elements
+    UIElements.dvrRecurringChannel = document.getElementById('dvr-recurring-channel');
+    UIElements.dvrRecurringStart = document.getElementById('dvr-recurring-start');
+    UIElements.dvrRecurringEnd = document.getElementById('dvr-recurring-end');
+    UIElements.dvrRecurringCreateBtn = document.getElementById('dvr-recurring-create-btn');
+    UIElements.dvrRecurringTbody = document.getElementById('dvr-recurring-tbody');
+    UIElements.dvrRecurringRefreshBtn = document.getElementById('dvr-recurring-refresh-btn');
     UIElements.noDvrJobsMessage = document.getElementById('no-dvr-jobs-message');
     UIElements.dvrRecordingsTbody = document.getElementById('dvr-recordings-tbody');
     UIElements.noDvrRecordingsMessage = document.getElementById('no-dvr-recordings-message');

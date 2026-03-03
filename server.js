@@ -137,6 +137,20 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
             db.run(`CREATE TABLE IF NOT EXISTS dvr_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, channelId TEXT NOT NULL, channelName TEXT NOT NULL, programTitle TEXT NOT NULL, startTime TEXT NOT NULL, endTime TEXT NOT NULL, status TEXT NOT NULL, ffmpeg_pid INTEGER, filePath TEXT, profileId TEXT, userAgentId TEXT, preBufferMinutes INTEGER, postBufferMinutes INTEGER, errorMessage TEXT, isConflicting INTEGER DEFAULT 0, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)`);
             db.run(`CREATE TABLE IF NOT EXISTS dvr_recordings (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER, user_id INTEGER NOT NULL, channelName TEXT NOT NULL, programTitle TEXT NOT NULL, startTime TEXT NOT NULL, durationSeconds INTEGER, fileSizeBytes INTEGER, filePath TEXT UNIQUE NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (job_id) REFERENCES dvr_jobs(id) ON DELETE SET NULL)`);
 
+            // --- NEW: DVR Recurring (Daily Schedule) ---
+            db.run(`CREATE TABLE IF NOT EXISTS dvr_recurring (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                channelId TEXT NOT NULL,
+                channelName TEXT NOT NULL,
+                startHHMM TEXT NOT NULL,
+                endHHMM TEXT NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                lastGeneratedDate TEXT,
+                createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )`);
+
             // --- NEW: VOD Tables ---
             db.run(`CREATE TABLE IF NOT EXISTS movies (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -268,6 +282,15 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
                 });
                 console.log(`[DVR] Loaded and scheduled ${jobs.length} pending DVR jobs.`);
             });
+
+            // --- NEW: Recurring DVR (daily schedules) ---
+            // Generate today's jobs on boot, and then check every 10 minutes.
+            generateRecurringJobsForToday().catch?.(() => {});
+            setInterval(() => {
+                generateRecurringJobsForToday().catch?.(() => {});
+            }, 10 * 60 * 1000);
+            // --- End Recurring DVR ---
+
             // --- End DVR Job Loading and Scheduling ---
         });
     }
@@ -4306,8 +4329,104 @@ function scheduleDvrJob(job) {
         startRecording(job);
     }
 
-    schedule.scheduleJob(endTime, () => stopRecording(job.id));
+    // Keep a reference for stopping too, so cancel works cleanly.
+    const stopJob = schedule.scheduleJob(endTime, () => stopRecording(job.id));
+    const existing = activeDvrJobs.get(job.id);
+    activeDvrJobs.set(job.id, {
+        cancel: () => {
+            try { existing?.cancel?.(); } catch (_) {}
+            try { stopJob?.cancel?.(); } catch (_) {}
+        }
+    });
+
     console.log(`[DVR] Scheduled recording stop for job ${job.id} at ${endTime}`);
+}
+
+function hhmmToDateToday(hhmm) {
+    const [hh, mm] = String(hhmm).split(':').map(v => parseInt(v, 10));
+    const d = new Date();
+    d.setSeconds(0, 0);
+    d.setHours(hh || 0, mm || 0, 0, 0);
+    return d;
+}
+
+async function generateRecurringJobsForToday() {
+    return new Promise((resolve) => {
+        const today = new Date();
+        const yyyy = today.getFullYear();
+        const mm = String(today.getMonth() + 1).padStart(2, '0');
+        const dd = String(today.getDate()).padStart(2, '0');
+        const todayKey = `${yyyy}-${mm}-${dd}`;
+
+        db.all("SELECT * FROM dvr_recurring WHERE enabled = 1", [], async (err, rows) => {
+            if (err) {
+                console.error('[DVR_RECURRING] Failed to load recurring schedules:', err);
+                return resolve(0);
+            }
+
+            let created = 0;
+            for (const rec of rows) {
+                if (rec.lastGeneratedDate === todayKey) continue;
+
+                const start = hhmmToDateToday(rec.startHHMM);
+                const end = hhmmToDateToday(rec.endHHMM);
+
+                // Allow overnight ranges (e.g. 23:00 -> 01:00)
+                if (end <= start) end.setDate(end.getDate() + 1);
+
+                const settings = getSettings();
+                const dvrSettings = settings.dvr || {};
+                const newJob = {
+                    user_id: rec.user_id,
+                    channelId: rec.channelId,
+                    channelName: rec.channelName,
+                    programTitle: `Daily Schedule: ${rec.channelName} (${rec.startHHMM}-${rec.endHHMM})`,
+                    startTime: start.toISOString(),
+                    endTime: end.toISOString(),
+                    status: 'scheduled',
+                    profileId: dvrSettings.activeRecordingProfileId,
+                    userAgentId: settings.activeUserAgentId,
+                    preBufferMinutes: 0,
+                    postBufferMinutes: 0,
+                };
+
+                try {
+                    const conflicts = await checkForConflicts(newJob, rec.user_id);
+                    if (conflicts.length > 0) {
+                        console.warn('[DVR_RECURRING] Conflict, skipping job generation for recurring id', rec.id);
+                        // still mark generated to avoid spamming conflicts every restart
+                        db.run("UPDATE dvr_recurring SET lastGeneratedDate = ? WHERE id = ?", [todayKey, rec.id]);
+                        continue;
+                    }
+                } catch (e) {
+                    console.warn('[DVR_RECURRING] Conflict check failed, skipping', e?.message);
+                    continue;
+                }
+
+                await new Promise((r) => {
+                    db.run(
+                        `INSERT INTO dvr_jobs (user_id, channelId, channelName, programTitle, startTime, endTime, status, profileId, userAgentId, preBufferMinutes, postBufferMinutes)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        [newJob.user_id, newJob.channelId, newJob.channelName, newJob.programTitle, newJob.startTime, newJob.endTime, newJob.status, newJob.profileId, newJob.userAgentId, newJob.preBufferMinutes, newJob.postBufferMinutes],
+                        function (insertErr) {
+                            if (insertErr) {
+                                console.error('[DVR_RECURRING] Failed to insert job:', insertErr);
+                                return r();
+                            }
+                            const jobWithId = { ...newJob, id: this.lastID };
+                            scheduleDvrJob(jobWithId);
+                            created += 1;
+                            db.run("UPDATE dvr_recurring SET lastGeneratedDate = ? WHERE id = ?", [todayKey, rec.id]);
+                            r();
+                        }
+                    );
+                });
+            }
+
+            if (created > 0) console.log(`[DVR_RECURRING] Generated ${created} daily recording job(s) for ${todayKey}`);
+            resolve(created);
+        });
+    });
 }
 
 
@@ -4496,6 +4615,67 @@ app.post('/api/dvr/schedule/manual', requireAuth, requireDvrAccess, async (req, 
         }
     );
 });
+
+// --- NEW: DVR Recurring API ---
+app.get('/api/dvr/recurring', requireAuth, requireDvrAccess, (req, res) => {
+    const query = req.session.isAdmin ? "SELECT r.*, u.username FROM dvr_recurring r JOIN users u ON r.user_id = u.id ORDER BY r.createdAt DESC" : "SELECT * FROM dvr_recurring WHERE user_id = ? ORDER BY createdAt DESC";
+    const params = req.session.isAdmin ? [] : [req.session.userId];
+    db.all(query, params, (err, rows) => {
+        if (err) return res.status(500).json({ error: 'Failed to retrieve recurring schedules.' });
+        res.json(rows);
+    });
+});
+
+app.post('/api/dvr/recurring', requireAuth, requireDvrAccess, (req, res) => {
+    const { channelId, channelName, startHHMM, endHHMM } = req.body;
+    if (!channelId || !channelName || !startHHMM || !endHHMM) {
+        return res.status(400).json({ error: 'channelId, channelName, startHHMM, endHHMM are required.' });
+    }
+    const hhmmRe = /^\d{2}:\d{2}$/;
+    if (!hhmmRe.test(startHHMM) || !hhmmRe.test(endHHMM)) {
+        return res.status(400).json({ error: 'startHHMM/endHHMM must be in HH:MM format.' });
+    }
+
+    db.run(
+        `INSERT INTO dvr_recurring (user_id, channelId, channelName, startHHMM, endHHMM, enabled)
+         VALUES (?, ?, ?, ?, ?, 1)`,
+        [req.session.userId, channelId, channelName, startHHMM, endHHMM],
+        async function (err) {
+            if (err) {
+                console.error('[DVR_RECURRING] Insert failed:', err);
+                return res.status(500).json({ error: 'Could not create recurring schedule.' });
+            }
+            // try generating immediately
+            try { await generateRecurringJobsForToday(); } catch (_) {}
+            res.status(201).json({ success: true, id: this.lastID });
+        }
+    );
+});
+
+app.put('/api/dvr/recurring/:id', requireAuth, requireDvrAccess, (req, res) => {
+    const { id } = req.params;
+    const { enabled } = req.body;
+    const val = enabled ? 1 : 0;
+    const query = req.session.isAdmin ? "UPDATE dvr_recurring SET enabled = ? WHERE id = ?" : "UPDATE dvr_recurring SET enabled = ? WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [val, id] : [val, id, req.session.userId];
+    db.run(query, params, function (err) {
+        if (err) return res.status(500).json({ error: 'Could not update recurring schedule.' });
+        if (this.changes === 0) return res.status(404).json({ error: 'Schedule not found or not authorized.' });
+        res.json({ success: true });
+    });
+});
+
+app.delete('/api/dvr/recurring/:id', requireAuth, requireDvrAccess, (req, res) => {
+    const { id } = req.params;
+    const query = req.session.isAdmin ? "DELETE FROM dvr_recurring WHERE id = ?" : "DELETE FROM dvr_recurring WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [id] : [id, req.session.userId];
+    db.run(query, params, function (err) {
+        if (err) return res.status(500).json({ error: 'Could not delete recurring schedule.' });
+        if (this.changes === 0) return res.status(404).json({ error: 'Schedule not found or not authorized.' });
+        res.json({ success: true });
+    });
+});
+// --- End DVR Recurring API ---
 
 // MODIFIED: Endpoint logic to show all jobs to admin, or user's jobs to them.
 app.get('/api/dvr/jobs', requireAuth, (req, res) => {

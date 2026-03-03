@@ -49,6 +49,7 @@ export const guideState = {
 export const dvrState = {
     scheduledJobs: [],
     completedRecordings: [],
+    recurring: [],
 };
 
 // NEW: State specific to the Admin Activity page
