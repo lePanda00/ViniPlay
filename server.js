@@ -145,11 +145,16 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
                 channelName TEXT NOT NULL,
                 startHHMM TEXT NOT NULL,
                 endHHMM TEXT NOT NULL,
+                startDate TEXT,
+                endDate TEXT,
                 enabled INTEGER DEFAULT 1,
                 lastGeneratedDate TEXT,
                 createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )`);
+            // Migration for older installs
+            db.run("ALTER TABLE dvr_recurring ADD COLUMN startDate TEXT", () => { });
+            db.run("ALTER TABLE dvr_recurring ADD COLUMN endDate TEXT", () => { });
 
             // --- NEW: VOD Tables ---
             db.run(`CREATE TABLE IF NOT EXISTS movies (
@@ -4350,6 +4355,53 @@ function hhmmToDateToday(hhmm) {
     return d;
 }
 
+function isDateKeyInRange(dateKey, startDate, endDate) {
+    if (startDate && dateKey < startDate) return false;
+    if (endDate && dateKey > endDate) return false;
+    return true;
+}
+
+function computeNextRecurringRun(rec, now, todayKey) {
+    if (!rec?.enabled) return null;
+
+    // If today's not in range, jump to startDate (if in future) otherwise no next.
+    let baseDateKey = todayKey;
+    if (!isDateKeyInRange(todayKey, rec.startDate, rec.endDate)) {
+        if (rec.startDate && rec.startDate > todayKey) baseDateKey = rec.startDate;
+        else return null;
+    }
+
+    // Build Date objects for the candidate day
+    const makeDateFromKeyAndHHMM = (key, hhmm) => {
+        const [y, m, d] = key.split('-').map(n => parseInt(n, 10));
+        const [hh, mm] = String(hhmm).split(':').map(n => parseInt(n, 10));
+        const dt = new Date();
+        dt.setFullYear(y, (m || 1) - 1, d || 1);
+        dt.setHours(hh || 0, mm || 0, 0, 0);
+        return dt;
+    };
+
+    const start = makeDateFromKeyAndHHMM(baseDateKey, rec.startHHMM);
+    const end = makeDateFromKeyAndHHMM(baseDateKey, rec.endHHMM);
+    if (end <= start) end.setDate(end.getDate() + 1);
+
+    // If it's already finished today, next is tomorrow (if in range)
+    if (end <= now) {
+        const tomorrow = new Date(now);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const tomorrowKey = tomorrow.toISOString().slice(0, 10);
+        if (!isDateKeyInRange(tomorrowKey, rec.startDate, rec.endDate)) return null;
+
+        const s2 = makeDateFromKeyAndHHMM(tomorrowKey, rec.startHHMM);
+        const e2 = makeDateFromKeyAndHHMM(tomorrowKey, rec.endHHMM);
+        if (e2 <= s2) e2.setDate(e2.getDate() + 1);
+        return { startTime: s2.toISOString(), endTime: e2.toISOString() };
+    }
+
+    // Otherwise next is today's (even if already started, it's still the next run)
+    return { startTime: start.toISOString(), endTime: end.toISOString() };
+}
+
 async function generateRecurringJobsForToday() {
     return new Promise((resolve) => {
         const today = new Date();
@@ -4367,12 +4419,23 @@ async function generateRecurringJobsForToday() {
             let created = 0;
             for (const rec of rows) {
                 if (rec.lastGeneratedDate === todayKey) continue;
+                if (!isDateKeyInRange(todayKey, rec.startDate, rec.endDate)) continue;
 
                 const start = hhmmToDateToday(rec.startHHMM);
                 const end = hhmmToDateToday(rec.endHHMM);
 
                 // Allow overnight ranges (e.g. 23:00 -> 01:00)
                 if (end <= start) end.setDate(end.getDate() + 1);
+
+                const now = new Date();
+                if (end <= now) {
+                    // Window already finished today; don't generate.
+                    db.run("UPDATE dvr_recurring SET lastGeneratedDate = ? WHERE id = ?", [todayKey, rec.id]);
+                    continue;
+                }
+
+                // If we are inside the window, start ASAP
+                const effectiveStart = start <= now ? new Date(now.getTime() + 5000) : start;
 
                 const settings = getSettings();
                 const dvrSettings = settings.dvr || {};
@@ -4381,7 +4444,7 @@ async function generateRecurringJobsForToday() {
                     channelId: rec.channelId,
                     channelName: rec.channelName,
                     programTitle: `Daily Schedule: ${rec.channelName} (${rec.startHHMM}-${rec.endHHMM})`,
-                    startTime: start.toISOString(),
+                    startTime: effectiveStart.toISOString(),
                     endTime: end.toISOString(),
                     status: 'scheduled',
                     profileId: dvrSettings.activeRecordingProfileId,
@@ -4618,16 +4681,32 @@ app.post('/api/dvr/schedule/manual', requireAuth, requireDvrAccess, async (req, 
 
 // --- NEW: DVR Recurring API ---
 app.get('/api/dvr/recurring', requireAuth, requireDvrAccess, (req, res) => {
-    const query = req.session.isAdmin ? "SELECT r.*, u.username FROM dvr_recurring r JOIN users u ON r.user_id = u.id ORDER BY r.createdAt DESC" : "SELECT * FROM dvr_recurring WHERE user_id = ? ORDER BY createdAt DESC";
+    const query = req.session.isAdmin
+        ? "SELECT r.*, u.username FROM dvr_recurring r JOIN users u ON r.user_id = u.id ORDER BY r.createdAt DESC"
+        : "SELECT * FROM dvr_recurring WHERE user_id = ? ORDER BY createdAt DESC";
     const params = req.session.isAdmin ? [] : [req.session.userId];
+
     db.all(query, params, (err, rows) => {
         if (err) return res.status(500).json({ error: 'Failed to retrieve recurring schedules.' });
-        res.json(rows);
+
+        const now = new Date();
+        const todayKey = now.toISOString().slice(0, 10);
+
+        const withNext = (rows || []).map((r) => {
+            const next = computeNextRecurringRun(r, now, todayKey);
+            return {
+                ...r,
+                nextStartTime: next?.startTime || null,
+                nextEndTime: next?.endTime || null,
+            };
+        });
+
+        res.json(withNext);
     });
 });
 
 app.post('/api/dvr/recurring', requireAuth, requireDvrAccess, (req, res) => {
-    const { channelId, channelName, startHHMM, endHHMM } = req.body;
+    const { channelId, channelName, startHHMM, endHHMM, startDate, endDate } = req.body;
     if (!channelId || !channelName || !startHHMM || !endHHMM) {
         return res.status(400).json({ error: 'channelId, channelName, startHHMM, endHHMM are required.' });
     }
@@ -4636,10 +4715,18 @@ app.post('/api/dvr/recurring', requireAuth, requireDvrAccess, (req, res) => {
         return res.status(400).json({ error: 'startHHMM/endHHMM must be in HH:MM format.' });
     }
 
+    // Dates are optional but if provided must be YYYY-MM-DD
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    const normStartDate = startDate && dateRe.test(startDate) ? startDate : null;
+    const normEndDate = endDate && dateRe.test(endDate) ? endDate : null;
+    if (normStartDate && normEndDate && normEndDate < normStartDate) {
+        return res.status(400).json({ error: 'endDate must be >= startDate.' });
+    }
+
     db.run(
-        `INSERT INTO dvr_recurring (user_id, channelId, channelName, startHHMM, endHHMM, enabled)
-         VALUES (?, ?, ?, ?, ?, 1)`,
-        [req.session.userId, channelId, channelName, startHHMM, endHHMM],
+        `INSERT INTO dvr_recurring (user_id, channelId, channelName, startHHMM, endHHMM, startDate, endDate, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+        [req.session.userId, channelId, channelName, startHHMM, endHHMM, normStartDate, normEndDate],
         async function (err) {
             if (err) {
                 console.error('[DVR_RECURRING] Insert failed:', err);

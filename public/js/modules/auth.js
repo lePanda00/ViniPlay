@@ -113,7 +113,10 @@ const initializeUIElements = () => {
     UIElements.dvrJobsTbody = document.getElementById('dvr-jobs-tbody');
 
     // NEW: Recurring DVR elements
-    UIElements.dvrRecurringChannel = document.getElementById('dvr-recurring-channel');
+    UIElements.dvrRecurringChannelSelectBtn = document.getElementById('dvr-recurring-channel-select-btn');
+    UIElements.dvrRecurringSelectedChannelName = document.getElementById('dvr-recurring-selected-channel-name');
+    UIElements.dvrRecurringChannelId = document.getElementById('dvr-recurring-channel-id');
+    UIElements.dvrRecurringChannelName = document.getElementById('dvr-recurring-channel-name');
     UIElements.dvrRecurringStart = document.getElementById('dvr-recurring-start');
     UIElements.dvrRecurringEnd = document.getElementById('dvr-recurring-end');
     UIElements.dvrRecurringCreateBtn = document.getElementById('dvr-recurring-create-btn');

@@ -24,9 +24,11 @@ export async function initDvrPage() {
 
     // Toggle visibility of DVR sections based on user permissions
     const manualRecSection = document.getElementById('manual-recording-section');
+    const recurringSection = document.getElementById('recurring-recording-section');
     const scheduledSection = document.getElementById('scheduled-recordings-section');
 
     if (manualRecSection) manualRecSection.classList.toggle('hidden', !hasDvrPermission);
+    if (recurringSection) recurringSection.classList.toggle('hidden', !hasDvrPermission);
     if (scheduledSection) scheduledSection.classList.toggle('hidden', !hasDvrPermission);
 
     const promises = [
@@ -72,32 +74,53 @@ async function loadRecurringSchedules() {
 }
 
 function setupRecurringUi() {
-    // Populate channel dropdown from current guide state (channels)
-    if (UIElements.dvrRecurringChannel && guideState.channels?.length) {
-        populateChannelSelector(UIElements.dvrRecurringChannel, guideState.channels, true);
-    }
-
     UIElements.dvrRecurringRefreshBtn?.addEventListener('click', async () => {
         await loadRecurringSchedules();
     });
 
-    UIElements.dvrRecurringCreateBtn?.addEventListener('click', async () => {
-        const select = UIElements.dvrRecurringChannel;
-        const start = UIElements.dvrRecurringStart?.value;
-        const end = UIElements.dvrRecurringEnd?.value;
-        if (!select?.value || !start || !end) {
-            return showNotification('Select a channel and start/end time.', true);
+    // Channel selection uses the same modal as manual recording
+    UIElements.dvrRecurringChannelSelectBtn?.addEventListener('click', () => {
+        document.body.dataset.channelSelectorContext = 'dvrRecurring';
+        populateChannelSelector();
+        openModal(UIElements.multiviewChannelSelectorModal);
+    });
+
+    UIElements.dvrRecurringCreateBtn?.addEventListener('click', async (e) => {
+        e.preventDefault();
+
+        const channelId = UIElements.dvrRecurringChannelId?.value;
+        const channelName = UIElements.dvrRecurringChannelName?.value;
+        const startLocal = UIElements.dvrRecurringStart?.value; // datetime-local
+        const endLocal = UIElements.dvrRecurringEnd?.value; // datetime-local
+
+        if (!channelId || !startLocal || !endLocal) {
+            return showNotification('Please fill out all fields for daily schedule.', true);
         }
-        const channelId = select.value;
-        const channelName = select.options[select.selectedIndex]?.textContent || 'Channel';
+        if (new Date(endLocal) <= new Date(startLocal)) {
+            return showNotification('End time must be after the start time.', true);
+        }
+
+        // Match manual recording UI: we keep the date pickers for defining the active range,
+        // but the recurring window is the HH:MM part.
+        const startHHMM = startLocal.slice(11, 16);
+        const endHHMM = endLocal.slice(11, 16);
+        const startDate = startLocal.slice(0, 10);
+        const endDate = endLocal.slice(0, 10);
 
         const res = await apiFetch('/api/dvr/recurring', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ channelId, channelName, startHHMM: start, endHHMM: end })
+            body: JSON.stringify({ channelId, channelName, startHHMM, endHHMM, startDate, endDate })
         });
+
         if (res && res.ok) {
-            showNotification('Daily schedule added.');
+            showNotification('Daily schedule programmed.');
+            UIElements.dvrRecurringStart.value = '';
+            UIElements.dvrRecurringEnd.value = '';
+            if (UIElements.dvrRecurringSelectedChannelName) UIElements.dvrRecurringSelectedChannelName.textContent = 'No channel selected';
+            if (UIElements.dvrRecurringChannelId) UIElements.dvrRecurringChannelId.value = '';
+            if (UIElements.dvrRecurringChannelName) UIElements.dvrRecurringChannelName.value = '';
+
             await loadRecurringSchedules();
             await loadScheduledJobs();
         } else {
@@ -111,14 +134,19 @@ function renderRecurringSchedules() {
     const tbody = UIElements.dvrRecurringTbody;
     if (!tbody) return;
     tbody.innerHTML = '';
+
     const rows = dvrState.recurring || [];
     rows.forEach((r) => {
         const tr = document.createElement('tr');
+        const activeRange = r.startDate && r.endDate ? `${r.startDate} → ${r.endDate}` : (r.startDate ? `${r.startDate} → ∞` : '—');
+        const nextRun = r.nextStartTime ? `${fromISOStringToLocalDateTime(r.nextStartTime)} → ${fromISOStringToLocalDateTime(r.nextEndTime)}` : '—';
+
         tr.innerHTML = `
             <td>${r.channelName}</td>
-            <td>${r.startHHMM}</td>
-            <td>${r.endHHMM}</td>
-            <td>${r.enabled ? 'Enabled' : 'Disabled'}</td>
+            <td>${r.startHHMM} → ${r.endHHMM}</td>
+            <td>${activeRange}</td>
+            <td>${r.enabled ? 'Programmed' : 'Disabled'}</td>
+            <td>${nextRun}</td>
             <td class="text-right">
                 <button data-action="toggle" data-id="${r.id}" class="bg-gray-600 hover:bg-gray-500 text-white text-xs font-bold py-1 px-2 rounded-md">${r.enabled ? 'Disable' : 'Enable'}</button>
                 <button data-action="delete" data-id="${r.id}" class="bg-red-600 hover:bg-red-500 text-white text-xs font-bold py-1 px-2 rounded-md ml-1">Delete</button>
@@ -456,10 +484,21 @@ export function handleDvrChannelClick(channelItem) {
     const channelName = channelItem.dataset.name;
     const channelId = channelItem.dataset.id;
 
-    // Update the UI and hidden form fields
-    UIElements.manualRecSelectedChannelName.textContent = channelName;
-    UIElements.manualRecChannelId.value = channelId;
-    UIElements.manualRecChannelName.value = channelName;
+    const ctx = document.body.dataset.channelSelectorContext;
+
+    if (ctx === 'dvrRecurring') {
+        // Update recurring schedule form
+        if (UIElements.dvrRecurringSelectedChannelName) {
+            UIElements.dvrRecurringSelectedChannelName.textContent = channelName;
+        }
+        if (UIElements.dvrRecurringChannelId) UIElements.dvrRecurringChannelId.value = channelId;
+        if (UIElements.dvrRecurringChannelName) UIElements.dvrRecurringChannelName.value = channelName;
+    } else {
+        // Default: manual DVR
+        UIElements.manualRecSelectedChannelName.textContent = channelName;
+        UIElements.manualRecChannelId.value = channelId;
+        UIElements.manualRecChannelName.value = channelName;
+    }
 
     closeModal(UIElements.multiviewChannelSelectorModal);
 }
