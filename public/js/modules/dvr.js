@@ -80,7 +80,8 @@ function setupRecurringUi() {
 
     // Channel selection uses the same modal as manual recording
     UIElements.dvrRecurringChannelSelectBtn?.addEventListener('click', () => {
-        document.body.dataset.channelSelectorContext = 'dvrRecurring';
+        document.body.dataset.channelSelectorContext = 'dvr';
+        document.body.dataset.dvrChannelPickerTarget = 'recurring';
         populateChannelSelector();
         openModal(UIElements.multiviewChannelSelectorModal);
     });
@@ -484,23 +485,23 @@ export function handleDvrChannelClick(channelItem) {
     const channelName = channelItem.dataset.name;
     const channelId = channelItem.dataset.id;
 
-    const ctx = document.body.dataset.channelSelectorContext;
+    // The main.js modal handler routes "dvr" context here for ALL DVR picks.
+    // We use a second flag to know which DVR form is currently picking.
+    const target = document.body.dataset.dvrChannelPickerTarget || 'manual';
 
-    if (ctx === 'dvrRecurring') {
-        // Update recurring schedule form
+    if (target === 'recurring') {
         if (UIElements.dvrRecurringSelectedChannelName) {
             UIElements.dvrRecurringSelectedChannelName.textContent = channelName;
         }
         if (UIElements.dvrRecurringChannelId) UIElements.dvrRecurringChannelId.value = channelId;
         if (UIElements.dvrRecurringChannelName) UIElements.dvrRecurringChannelName.value = channelName;
     } else {
-        // Default: manual DVR
         UIElements.manualRecSelectedChannelName.textContent = channelName;
         UIElements.manualRecChannelId.value = channelId;
         UIElements.manualRecChannelName.value = channelName;
     }
 
-    closeModal(UIElements.multiviewChannelSelectorModal);
+    // NOTE: main.js already closes the modal + clears dataset.channelSelectorContext.
 }
 
 export function setupDvrEventListeners() {
@@ -678,6 +679,7 @@ export function setupDvrEventListeners() {
     if (UIElements.manualRecChannelSelectBtn) {
         UIElements.manualRecChannelSelectBtn.addEventListener('click', () => {
             document.body.dataset.channelSelectorContext = 'dvr';
+            document.body.dataset.dvrChannelPickerTarget = 'manual';
             populateChannelSelector();
             openModal(UIElements.multiviewChannelSelectorModal);
         });
