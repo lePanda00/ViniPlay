@@ -164,12 +164,21 @@ function renderRecurringSchedules() {
         if (!id || !action) return;
 
         if (action === 'delete') {
-            const ok = await showConfirm('Delete this daily schedule?');
-            if (!ok) return;
-            const res = await apiFetch(`/api/dvr/recurring/${id}`, { method: 'DELETE' });
-            if (res && res.ok) {
-                await loadRecurringSchedules();
-            }
+            showConfirm(
+                'Delete Daily Schedule?',
+                'Are you sure you want to delete this daily schedule?',
+                async () => {
+                    const res = await apiFetch(`/api/dvr/recurring/${id}`, { method: 'DELETE' });
+                    if (res && res.ok) {
+                        showNotification('Daily schedule deleted.');
+                        await loadRecurringSchedules();
+                        await loadScheduledJobs();
+                    } else {
+                        const err = res ? await res.json().catch(() => ({})) : {};
+                        showNotification(err.error || 'Could not delete daily schedule.', true);
+                    }
+                }
+            );
         }
 
         if (action === 'toggle') {
